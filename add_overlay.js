@@ -19,9 +19,9 @@ for (const r of data) {
   const srcdoc = escapeForAttr(r.adm);
   r.adm_with_overlay =
     `<div style="position:relative;display:inline-block;width:${w}px;height:${h}px;">` +
-    `<iframe srcdoc="${srcdoc}" width="${w}" height="${h}" style="border:0;display:block;" scrolling="no"></iframe>` +
     `<div style="position:absolute;top:0;left:0;background:rgba(0,0,0,.75);color:#0f0;` +
     `font:10px monospace;padding:2px 4px;pointer-events:none;z-index:9999;">${r.id}</div>` +
+    `<iframe srcdoc="${srcdoc}" width="${w}" height="${h}" style="border:0;display:block;position:relative;z-index:0;" scrolling="no"></iframe>` +
     `</div>`;
 }
 
