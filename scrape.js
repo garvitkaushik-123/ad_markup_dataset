@@ -241,6 +241,7 @@ async function main() {
         width,
         height,
         adm,
+        sourced_at: new Date().toISOString(),
       };
 
       newEntries.push(record);
