@@ -6,11 +6,16 @@ const { execSync } = require('child_process');
 const DATASET_PATH = 'ad_markup_dataset.json';
 const SITES_PATH = 'scrape_sites.json';
 
-const AD_SELECTORS = [
+// Selectors for iframes injected by ad networks (the actual ad creative)
+const AD_IFRAME_SELECTORS = [
   'iframe[id*="google_ads_iframe"]',
+  'iframe[id*="aswift"]',
+];
+
+// Selectors for publisher-side containers that hold ad-network iframes inside
+const AD_CONTAINER_SELECTORS = [
   'div[id*="div-gpt-ad"]',
   'ins.adsbygoogle',
-  'iframe[id*="aswift"]',
   'div[data-google-query-id]',
 ];
 
@@ -106,68 +111,57 @@ function getNextSerial(dataset, siteName) {
   return max + 1;
 }
 
+async function extractIframeContent(iframe) {
+  let adm;
+  try {
+    const frame = await iframe.contentFrame();
+    if (frame) adm = await frame.content();
+  } catch {}
+  // cross-origin: capture the iframe tag itself (src, attrs = what the network sent)
+  if (!adm) adm = await iframe.evaluate(e => e.outerHTML);
+  return adm;
+}
+
 async function extractAdsFromPage(page, url) {
   const ads = [];
+  const capturedSrcs = new Set();
 
-  // collect from known selectors
-  for (const selector of AD_SELECTORS) {
-    const elements = await page.$$(selector);
-    for (const el of elements) {
-      const tagName = await el.evaluate(e => e.tagName.toLowerCase());
-      const width = await el.evaluate(e => e.offsetWidth);
-      const height = await el.evaluate(e => e.offsetHeight);
-
-      if (width < 10 || height < 10) continue; // skip tracking pixels / hidden elements
-
-      let adm;
-      if (tagName === 'iframe') {
-        try {
-          const frame = await el.contentFrame();
-          if (frame) {
-            adm = await frame.content();
-          }
-        } catch {
-          // cross-origin: fall back to outer HTML
-        }
-        if (!adm) {
-          adm = await el.evaluate(e => e.outerHTML);
-        }
-      } else {
-        adm = await el.evaluate(e => e.outerHTML);
-      }
-
-      if (adm && adm.trim().length > 20) {
-        ads.push({ adm, width, height });
-      }
-    }
-  }
-
-  // collect iframes with ad-domain src not already caught
-  const allIframes = await page.$$('iframe[src]');
-  for (const iframe of allIframes) {
-    const src = await iframe.evaluate(e => e.src);
-    const isAdDomain = AD_DOMAIN_PATTERNS.some(d => src.includes(d));
-    if (!isAdDomain) continue;
-
-    const alreadyCaptured = ads.some(a => a.adm.includes(src));
-    if (alreadyCaptured) continue;
+  async function addIframe(iframe) {
+    const src = await iframe.evaluate(e => e.src || '');
+    if (src && capturedSrcs.has(src)) return;
 
     const width = await iframe.evaluate(e => e.offsetWidth);
     const height = await iframe.evaluate(e => e.offsetHeight);
-    if (width < 10 || height < 10) continue;
+    if (width < 10 || height < 10) return;
 
-    let adm;
-    try {
-      const frame = await iframe.contentFrame();
-      if (frame) adm = await frame.content();
-    } catch {}
-    if (!adm) {
-      adm = await iframe.evaluate(e => e.outerHTML);
-    }
+    const adm = await extractIframeContent(iframe);
+    if (!adm || adm.trim().length <= 20) return;
 
-    if (adm && adm.trim().length > 20) {
-      ads.push({ adm, width, height });
+    if (src) capturedSrcs.add(src);
+    ads.push({ adm, width, height });
+  }
+
+  // Pass 1: known ad-network iframes (directly injected by ad platforms)
+  for (const selector of AD_IFRAME_SELECTORS) {
+    const iframes = await page.$$(selector);
+    for (const iframe of iframes) await addIframe(iframe);
+  }
+
+  // Pass 2: dig into publisher containers, extract ad-network iframes inside
+  for (const selector of AD_CONTAINER_SELECTORS) {
+    const containers = await page.$$(selector);
+    for (const container of containers) {
+      const innerIframes = await container.$$('iframe');
+      for (const iframe of innerIframes) await addIframe(iframe);
     }
+  }
+
+  // Pass 3: any iframe whose src matches a known ad domain, not already caught
+  const allIframes = await page.$$('iframe[src]');
+  for (const iframe of allIframes) {
+    const src = await iframe.evaluate(e => e.src);
+    if (!AD_DOMAIN_PATTERNS.some(d => src.includes(d))) continue;
+    await addIframe(iframe);
   }
 
   return ads;
