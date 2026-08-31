@@ -119,6 +119,18 @@ function isRenderableAd(adm) {
   return hasClickable || hasMedia;
 }
 
+function cleanAdMarkup(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<div[^>]*class="GoogleActiveView[^"]*"[\s\S]*?<\/div>/gi, '')
+    .replace(/src=&quot;([^&]*)&quot;/g, 'src="$1"')
+    .replace(/href=&quot;([^&]*)&quot;/g, 'href="$1"')
+    .replace(/&lt;\/script&gt;/gi, '')
+    .replace(/&lt;script[^&]*&gt;/gi, '')
+    .replace(/(src|href)="\/\//g, '$1="https://')
+    .trim();
+}
+
 async function extractIframeContent(iframe) {
   try {
     const frame = await iframe.contentFrame();
@@ -127,7 +139,7 @@ async function extractIframeContent(iframe) {
         document.body ? document.body.innerHTML : ''
       );
       if (bodyHtml && bodyHtml.trim().length > 50) {
-        return bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '').trim();
+        return cleanAdMarkup(bodyHtml);
       }
     }
   } catch {}
