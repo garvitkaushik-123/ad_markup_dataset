@@ -111,15 +111,27 @@ function getNextSerial(dataset, siteName) {
   return max + 1;
 }
 
+function isRenderableAd(adm) {
+  const noScripts = adm.replace(/<script[\s\S]*?<\/script>/gi, '').trim();
+  if (noScripts.length < 50) return false;
+  const hasClickable = /<a\b[^>]+href/i.test(noScripts);
+  const hasMedia = /<(img|video|canvas|svg|picture)\b/i.test(noScripts);
+  return hasClickable || hasMedia;
+}
+
 async function extractIframeContent(iframe) {
-  let adm;
   try {
     const frame = await iframe.contentFrame();
-    if (frame) adm = await frame.content();
+    if (frame) {
+      const bodyHtml = await frame.evaluate(() =>
+        document.body ? document.body.innerHTML : ''
+      );
+      if (bodyHtml && bodyHtml.trim().length > 50) {
+        return bodyHtml.replace(/<script[\s\S]*?<\/script>/gi, '').trim();
+      }
+    }
   } catch {}
-  // cross-origin: capture the iframe tag itself (src, attrs = what the network sent)
-  if (!adm) adm = await iframe.evaluate(e => e.outerHTML);
-  return adm;
+  return await iframe.evaluate(e => e.outerHTML);
 }
 
 async function extractAdsFromPage(page, url) {
@@ -130,12 +142,26 @@ async function extractAdsFromPage(page, url) {
     const src = await iframe.evaluate(e => e.src || '');
     if (src && capturedSrcs.has(src)) return;
 
-    const width = await iframe.evaluate(e => e.offsetWidth);
-    const height = await iframe.evaluate(e => e.offsetHeight);
+    let width = await iframe.evaluate(e => e.offsetWidth);
+    let height = await iframe.evaluate(e => e.offsetHeight);
+
+    if (width < 10 || height < 10) {
+      try {
+        const frame = await iframe.contentFrame();
+        if (frame) {
+          const dims = await frame.evaluate(() => ({
+            w: document.body ? document.body.scrollWidth : 0,
+            h: document.body ? document.body.scrollHeight : 0
+          }));
+          if (dims.w >= 10 && dims.h >= 10) { width = dims.w; height = dims.h; }
+        }
+      } catch {}
+    }
     if (width < 10 || height < 10) return;
 
     const adm = await extractIframeContent(iframe);
     if (!adm || adm.trim().length <= 20) return;
+    if (!isRenderableAd(adm)) return;
 
     if (src) capturedSrcs.add(src);
     ads.push({ adm, width, height });
@@ -197,10 +223,10 @@ async function main() {
     let page;
     try {
       page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
       await page.setViewport({ width: 1440, height: 900 });
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      // wait for ad auctions to settle
-      await new Promise(r => setTimeout(r, 10000));
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+      await new Promise(r => setTimeout(r, 15000));
     } catch (err) {
       console.warn(`Failed to load ${url}: ${err.message}`);
       if (page) await page.close();
