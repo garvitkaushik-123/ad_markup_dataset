@@ -1,6 +1,8 @@
 {
   "sites": [
     "https://jsonbeautifier.org/",
-    "https://codebeautify.org/jsonviewer"
-  ]
+    "https://codebeautify.org/jsonviewer",
+    "https://www.onlinegdb.com/online_c++_compiler"
+  ],
+  "interval_hours": 6
 }
