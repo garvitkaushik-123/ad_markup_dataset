@@ -112,17 +112,34 @@ function getNextSerial(dataset, siteName) {
 }
 
 function isRenderableAd(adm) {
-  const noScripts = adm.replace(/<script[\s\S]*?<\/script>/gi, '').trim();
-  if (noScripts.length < 50) return false;
-  const hasClickable = /<a\b[^>]+href/i.test(noScripts);
-  const hasMedia = /<(img|video|canvas|svg|picture)\b/i.test(noScripts);
-  return hasClickable || hasMedia;
+  // Google's native/responsive ad framework marks an uncomposed (empty) slot
+  // with data-nc="1" on its wrapper — the creative never got filled in.
+  if (/data-nc="1"/.test(adm)) return false;
+
+  const stripped = adm
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    // the "why this ad" / AdChoices link is boilerplate present on every
+    // Google ad wrapper regardless of whether a creative actually rendered
+    .replace(/<a\b[^>]*adssettings\.google\.com\/whythisad[^>]*>[\s\S]*?<\/a>/gi, '');
+
+  const visibleText = stripped.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+  const hasMedia = /<(img|video|picture)\b[^>]*\bsrc=/i.test(stripped);
+  return visibleText.length >= 3 || hasMedia;
 }
 
 function cleanAdMarkup(html) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<div[^>]*class="GoogleActiveView[^"]*"[\s\S]*?<\/div>/gi, '')
+    .replace(/<div[^>]*style="[^"]*visibility:\s*hidden[^"]*"[\s\S]*?<\/div>/gi, '')
+    .replace(/<meta[^>]*data-(?:ifc-map|asoch-meta|google-av)[^>]*>/gi, '')
+    .replace(/<div[^>]*id="mys-meta"[\s\S]*?<\/div>/gi, '')
+    .replace(/<div[^>]*id="mys-overlay"[^>]*>[\s\S]*?<\/div>/gi, '')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<div[^>]*id="(?:abgac|mute_panel)"[\s\S]*?<\/div>\s*<\/div>/gi, '')
+    .replace(/\s+data-google-av-[a-z-]+="[^"]*"/gi, '')
+    .replace(/\s+data-creative-load-listener="[^"]*"/gi, '')
     .replace(/src=&quot;([^&]*)&quot;/g, 'src="$1"')
     .replace(/href=&quot;([^&]*)&quot;/g, 'href="$1"')
     .replace(/&lt;\/script&gt;/gi, '')
@@ -135,12 +152,31 @@ async function extractIframeContent(iframe) {
   try {
     const frame = await iframe.contentFrame();
     if (frame) {
-      const bodyHtml = await frame.evaluate(() =>
-        document.body ? document.body.innerHTML : ''
-      );
-      if (bodyHtml && bodyHtml.trim().length > 50) {
-        return cleanAdMarkup(bodyHtml);
-      }
+      const result = await frame.evaluate(() => {
+        if (!document.body) return null;
+        const clone = document.body.cloneNode(true);
+        const kill = [
+          'script', 'noscript', 'link',
+          'iframe[width="0"]', 'iframe[height="0"]',
+          '[class*="GoogleActiveView"]',
+          '#mys-meta', '#mys-overlay',
+          '#abgac', '#mute_panel',
+          'meta[data-ifc-map]', 'meta[data-asoch-meta]',
+          'meta[data-google-av-override]',
+          'img[style*="display:none"]', 'img[style*="display: none"]',
+          'div[style*="visibility: hidden"]', 'div[style*="visibility:hidden"]',
+        ];
+        for (const sel of kill) {
+          clone.querySelectorAll(sel).forEach(el => el.remove());
+        }
+        const styles = [];
+        for (const s of document.querySelectorAll('style')) {
+          styles.push(s.outerHTML);
+        }
+        const html = clone.innerHTML.trim();
+        return html.length > 30 ? styles.join('') + html : null;
+      });
+      if (result) return cleanAdMarkup(result);
     }
   } catch {}
   return await iframe.evaluate(e => e.outerHTML);
@@ -153,6 +189,13 @@ async function extractAdsFromPage(page, url) {
   async function addIframe(iframe) {
     const src = await iframe.evaluate(e => e.src || '');
     if (src && capturedSrcs.has(src)) return;
+
+    // GAM's native/responsive ad format composes creative content lazily,
+    // triggered by an IntersectionObserver — an off-screen slot never fills.
+    try {
+      await iframe.evaluate(e => e.scrollIntoView({ block: 'center' }));
+      await new Promise(r => setTimeout(r, 1500));
+    } catch {}
 
     let width = await iframe.evaluate(e => e.offsetWidth);
     let height = await iframe.evaluate(e => e.offsetHeight);
