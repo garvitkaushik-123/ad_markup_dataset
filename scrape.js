@@ -154,7 +154,24 @@ async function extractIframeContent(iframe) {
     if (frame) {
       const result = await frame.evaluate(() => {
         if (!document.body) return null;
+
+        // cloneNode(true) does not traverse open shadow roots — custom
+        // elements like <lima-video> (Google IMA's video player) keep the
+        // actual <video src="..."> creative inside their shadow DOM, so it
+        // gets silently dropped unless we flatten it into light DOM first.
+        const shadowHosts = [...document.body.querySelectorAll('*')].filter(el => el.shadowRoot);
+        shadowHosts.forEach((el, i) => el.setAttribute('data-shadow-flatten', String(i)));
+        const shadowHTMLs = shadowHosts.map(el => el.shadowRoot.innerHTML);
+
         const clone = document.body.cloneNode(true);
+
+        shadowHosts.forEach(el => el.removeAttribute('data-shadow-flatten'));
+        clone.querySelectorAll('[data-shadow-flatten]').forEach(el => {
+          const idx = Number(el.getAttribute('data-shadow-flatten'));
+          el.removeAttribute('data-shadow-flatten');
+          if (shadowHTMLs[idx] != null) el.innerHTML = shadowHTMLs[idx];
+        });
+
         const kill = [
           'script', 'noscript', 'link',
           'iframe[width="0"]', 'iframe[height="0"]',
@@ -192,9 +209,11 @@ async function extractAdsFromPage(page, url) {
 
     // GAM's native/responsive ad format composes creative content lazily,
     // triggered by an IntersectionObserver — an off-screen slot never fills.
+    // Video ad players (lima-video) also need this time to fetch their VAST
+    // creative and populate the <video src> inside their shadow DOM.
     try {
       await iframe.evaluate(e => e.scrollIntoView({ block: 'center' }));
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 3000));
     } catch {}
 
     let width = await iframe.evaluate(e => e.offsetWidth);
