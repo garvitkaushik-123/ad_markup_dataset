@@ -280,6 +280,91 @@ function gitCommitAndPush(newCount, siteNames) {
   }
 }
 
+const SITE_CONCURRENCY = 4;
+
+// ponytail: fixed-size worker pool, no p-limit dep for a 4-way fan-out
+async function mapWithConcurrency(items, limit, fn) {
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const item = items[next++];
+      await fn(item);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+async function scrapeSite(browser, url, dataset, existingHashes, newEntries, siteNames) {
+  const siteName = siteNameFromUrl(url);
+  console.log(`Scraping ${url} (site: ${siteName})...`);
+
+  let page;
+  try {
+    page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 15000));
+  } catch (err) {
+    console.warn(`Failed to load ${url}: ${err.message}`);
+    if (page) await page.close();
+    return;
+  }
+
+  let ads;
+  try {
+    ads = await extractAdsFromPage(page, url);
+  } catch (err) {
+    console.warn(`Failed to extract ads from ${url}: ${err.message}`);
+    await page.close();
+    return;
+  }
+
+  if (ads.length === 0) {
+    console.log(`  No ads found on ${url}`);
+    await page.close();
+    return;
+  }
+
+  // dataset is untouched until every site has finished (see main()), and
+  // this block has no awaits, so the check-and-add below can't race with
+  // another site's worker even though they run concurrently.
+  let serial = getNextSerial(dataset, siteName);
+  let addedFromSite = 0;
+  const addedIds = [];
+
+  for (const { adm, width, height } of ads) {
+    const hash = sha256(normalizeForHash(adm));
+    if (existingHashes.has(hash)) continue;
+
+    existingHashes.add(hash);
+    const id = `webscraped-${siteName}-${serial}`;
+    serial++;
+
+    const record = {
+      id,
+      source: 'webscraped',
+      format_type: classifyFormatType(adm),
+      vendor_style: classifyVendorStyle(adm),
+      width,
+      height,
+      adm,
+      sourced_at: new Date().toISOString(),
+    };
+
+    newEntries.push(record);
+    siteNames.push(siteName);
+    addedIds.push(id);
+    addedFromSite++;
+  }
+
+  console.log(`  Found ${ads.length} ads, ${addedFromSite} new`);
+  if (addedIds.length > 0) {
+    console.log(`  Added IDs: ${addedIds.join(', ')}`);
+  }
+  await page.close();
+}
+
 async function main() {
   const sitesConfig = JSON.parse(fs.readFileSync(SITES_PATH, 'utf8'));
   const dataset = JSON.parse(fs.readFileSync(DATASET_PATH, 'utf8'));
@@ -290,68 +375,9 @@ async function main() {
 
   const browser = await puppeteer.launch({ headless: true });
 
-  for (const url of sitesConfig.sites) {
-    const siteName = siteNameFromUrl(url);
-    console.log(`Scraping ${url} (site: ${siteName})...`);
-
-    let page;
-    try {
-      page = await browser.newPage();
-      await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36');
-      await page.setViewport({ width: 1440, height: 900 });
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-      await new Promise(r => setTimeout(r, 15000));
-    } catch (err) {
-      console.warn(`Failed to load ${url}: ${err.message}`);
-      if (page) await page.close();
-      continue;
-    }
-
-    let ads;
-    try {
-      ads = await extractAdsFromPage(page, url);
-    } catch (err) {
-      console.warn(`Failed to extract ads from ${url}: ${err.message}`);
-      await page.close();
-      continue;
-    }
-
-    if (ads.length === 0) {
-      console.log(`  No ads found on ${url}`);
-      await page.close();
-      continue;
-    }
-
-    let serial = getNextSerial(dataset, siteName);
-    let addedFromSite = 0;
-
-    for (const { adm, width, height } of ads) {
-      const hash = sha256(normalizeForHash(adm));
-      if (existingHashes.has(hash)) continue;
-
-      existingHashes.add(hash);
-      const id = `webscraped-${siteName}-${serial}`;
-      serial++;
-
-      const record = {
-        id,
-        source: 'webscraped',
-        format_type: classifyFormatType(adm),
-        vendor_style: classifyVendorStyle(adm),
-        width,
-        height,
-        adm,
-        sourced_at: new Date().toISOString(),
-      };
-
-      newEntries.push(record);
-      siteNames.push(siteName);
-      addedFromSite++;
-    }
-
-    console.log(`  Found ${ads.length} ads, ${addedFromSite} new`);
-    await page.close();
-  }
+  await mapWithConcurrency(sitesConfig.sites, SITE_CONCURRENCY, url =>
+    scrapeSite(browser, url, dataset, existingHashes, newEntries, siteNames)
+  );
 
   await browser.close();
 
@@ -367,6 +393,7 @@ async function main() {
 
   fs.writeFileSync(DATASET_PATH, JSON.stringify(dataset, null, 2));
   console.log(`Appended ${newEntries.length} new records to ${DATASET_PATH}`);
+  console.log(`IDs: ${newEntries.map(e => e.id).join(', ')}`);
 
   gitCommitAndPush(newEntries.length, siteNames);
 }
